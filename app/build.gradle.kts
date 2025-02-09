@@ -11,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "com.cameraviewer"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
@@ -42,7 +42,7 @@ android {
         compose = true
     }
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.1"
+        kotlinCompilerExtensionVersion = "1.5.10"
     }
     packaging {
         resources {
@@ -65,6 +65,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation("com.google.android.material:material:1.11.0")
 
     // Dependency Injection
     implementation("com.google.dagger:hilt-android:2.50")
@@ -76,10 +77,11 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     kapt("androidx.room:room-compiler:2.6.1")
 
-    // Video Player
-    implementation("com.google.android.exoplayer:exoplayer-core:2.19.1")
-    implementation("com.google.android.exoplayer:exoplayer-rtsp:2.19.1")
-    implementation("com.google.android.exoplayer:exoplayer-ui:2.19.1")
+    // Media3
+    implementation("androidx.media3:media3-exoplayer:1.2.1")
+    implementation("androidx.media3:media3-ui:1.2.1")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.2.1")
+    implementation("androidx.media3:media3-common:1.2.1")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

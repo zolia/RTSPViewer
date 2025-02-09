@@ -13,21 +13,27 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.media3.common.*
+import androidx.media3.exoplayer.*
+import androidx.media3.exoplayer.rtsp.*
+import androidx.media3.ui.PlayerView
 import com.cameraviewer.viewmodel.LiveViewViewModel
-import com.google.android.exoplayer2.ExoPlayer
-import com.google.android.exoplayer2.MediaItem
-import com.google.android.exoplayer2.Player
-import com.google.android.exoplayer2.source.rtsp.RtspMediaSource
-import com.google.android.exoplayer2.ui.StyledPlayerView
+import androidx.media3.common.util.UnstableApi
+import com.cameraviewer.viewmodel.TimeSyncStatus
 import com.cameraviewer.ui.components.TimestampPicker
+import kotlinx.coroutines.launch
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 
+@OptIn(ExperimentalMaterial3Api::class)
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun LiveViewScreen(
     cameraId: Long,
@@ -36,24 +42,50 @@ fun LiveViewScreen(
 ) {
     val context = LocalContext.current
     val camera by viewModel.getCamera(cameraId).collectAsState(initial = null)
-    
+
     var player by remember { mutableStateOf<ExoPlayer?>(null) }
     var isPlaying by remember { mutableStateOf(true) }
     var showTimestampPicker by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    var playerError by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(camera?.url) {
         val newPlayer = ExoPlayer.Builder(context).build()
-        
+
         camera?.url?.let { url ->
             val mediaSource = RtspMediaSource.Factory()
                 .setForceUseRtpTcp(true)
+                .setTimeoutMs(12000) // Increase timeout for more stability
+                .setDebugLoggingEnabled(true)
+                .setUserAgent("CameraViewer/1.0")
                 .createMediaSource(MediaItem.fromUri(url))
-            
+
+            newPlayer.addListener(object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    playerError = when (error.errorCode) {
+                        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ->
+                            "Network connection failed. Please check your connection and try again."
+                        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
+                            "Connection timed out. The camera might be offline."
+                        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ->
+                            "Failed to initialize video decoder. The stream format might be unsupported."
+                        else -> "Playback error: ${error.message}"
+                    }
+                }
+
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_READY) {
+                        playerError = null
+                    }
+                }
+            })
+
             newPlayer.setMediaSource(mediaSource)
             newPlayer.prepare()
             newPlayer.playWhenReady = true
         }
-        
+
         player = newPlayer
 
         onDispose {
@@ -62,6 +94,9 @@ fun LiveViewScreen(
     }
 
     Scaffold(
+        snackbarHost = {
+            SnackbarHost(hostState = snackbarHostState)
+        },
         topBar = {
             TopAppBar(
                 title = { Text(camera?.name ?: "Live View") },
@@ -77,7 +112,6 @@ fun LiveViewScreen(
                     IconButton(onClick = { viewModel.checkTimeSync(player) }) {
                         Icon(Icons.Default.Schedule, contentDescription = "Check Time Sync")
                     }
-                actions = {
                     IconButton(onClick = { showTimestampPicker = !showTimestampPicker }) {
                         Icon(Icons.Default.AccessTime, contentDescription = "Select Timestamp")
                     }
@@ -91,19 +125,19 @@ fun LiveViewScreen(
         LaunchedEffect(timeSyncStatus) {
             when (val status = timeSyncStatus) {
                 is TimeSyncStatus.OutOfSync -> {
-                    SnackbarHostState().showSnackbar(
+                    snackbarHostState.showSnackbar(
                         message = "Camera time is out of sync by ${status.diffSeconds} seconds",
                         duration = SnackbarDuration.Long
                     )
                 }
                 is TimeSyncStatus.SlightlyOff -> {
-                    SnackbarHostState().showSnackbar(
+                    snackbarHostState.showSnackbar(
                         message = "Camera time is slightly off by ${status.diffSeconds} seconds",
                         duration = SnackbarDuration.Short
                     )
                 }
                 is TimeSyncStatus.Synced -> {
-                    SnackbarHostState().showSnackbar(
+                    snackbarHostState.showSnackbar(
                         message = "Camera time is in sync",
                         duration = SnackbarDuration.Short
                     )
@@ -130,10 +164,12 @@ fun LiveViewScreen(
                             viewModel.seekToTimestamp(exoPlayer, timestamp) { error ->
                                 // Show error message if seek fails
                                 error?.let {
-                                    SnackbarHostState().showSnackbar(
-                                        message = error,
-                                        duration = SnackbarDuration.Long
-                                    )
+                                    viewModel.viewModelScope.launch {
+                                        snackbarHostState.showSnackbar(
+                                            message = error,
+                                            duration = SnackbarDuration.Long
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -142,16 +178,36 @@ fun LiveViewScreen(
             }
 
             player?.let { exoPlayer ->
-                AndroidView(
-                    factory = { context ->
-                        StyledPlayerView(context).apply {
-                            layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
-                            player = exoPlayer
+                Box(modifier = Modifier.fillMaxSize()) {
+                    AndroidView(
+                        factory = { context ->
+                            PlayerView(context).apply {
+                                layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+                                player = exoPlayer
+                                useController = false // We have our own controls
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    playerError?.let { error ->
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .padding(16.dp),
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = MaterialTheme.shapes.medium
+                        ) {
+                            Text(
+                                text = error,
+                                modifier = Modifier.padding(16.dp),
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
                         }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-                
+                    }
+                }
+
                 // Playback controls
                 Row(
                     modifier = Modifier
@@ -171,7 +227,7 @@ fun LiveViewScreen(
                             tint = MaterialTheme.colorScheme.onSurface
                         )
                     }
-                    
+
                     IconButton(
                         onClick = {
                             if (isPlaying) {

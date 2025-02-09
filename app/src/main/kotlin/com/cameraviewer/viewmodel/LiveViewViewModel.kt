@@ -2,21 +2,21 @@ package com.cameraviewer.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.*
+import androidx.media3.common.util.UnstableApi
 import com.cameraviewer.data.Camera
 import com.cameraviewer.data.CameraDao
-import com.google.android.exoplayer2.Player
-import com.google.android.exoplayer2.source.rtsp.RtspMediaSource
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
+import com.cameraviewer.utils.RtspUtils
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
+import javax.inject.Inject
+import kotlin.math.absoluteValue
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @HiltViewModel
 class LiveViewViewModel @Inject constructor(
     private val cameraDao: CameraDao
@@ -29,12 +29,21 @@ class LiveViewViewModel @Inject constructor(
 
     fun seekToTimestamp(player: Player, timestamp: LocalDateTime, onError: (String?) -> Unit) {
         try {
-            val startPosition = timestamp.toInstant(ZoneOffset.UTC).toEpochMilli()
-            
+            val calendar = java.util.Calendar.getInstance()
+            calendar.set(
+                timestamp.year,
+                timestamp.monthValue - 1, // Calendar months are 0-based
+                timestamp.dayOfMonth,
+                timestamp.hour,
+                timestamp.minute,
+                timestamp.second
+            )
+            val startPosition = calendar.timeInMillis
+
             player.addListener(object : Player.Listener {
-                override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     when (error.errorCode) {
-                        com.google.android.exoplayer2.PlaybackException.ERROR_CODE_REMOTE_ERROR -> {
+                        androidx.media3.common.PlaybackException.ERROR_CODE_REMOTE_ERROR -> {
                             // RTSP error responses (457, 451, etc.)
                             onError("This camera does not support seeking to a specific time")
                         }
@@ -54,11 +63,11 @@ class LiveViewViewModel @Inject constructor(
             })
 
             // Attempt to seek
-            val mediaSource = RtspMediaSource.Factory()
-                .setForceUseRtpTcp(true)
-                .createMediaSource(MediaItem.fromUri(player.currentMediaItem?.localConfiguration?.uri ?: return))
-            
-            player.setMediaSource(mediaSource)
+            val mediaSource = RtspUtils.createRtspMediaSource(
+                player.currentMediaItem?.localConfiguration?.uri.toString()
+            )
+
+            player.setMediaItem(MediaItem.fromUri(player.currentMediaItem?.mediaId ?: return))
             player.seekTo(startPosition)
             player.prepare()
             player.playWhenReady = true
@@ -72,27 +81,28 @@ class LiveViewViewModel @Inject constructor(
 
     fun checkTimeSync(player: Player?) {
         player?.let { exoPlayer ->
-            val metadata = exoPlayer.mediaMetadata
-            // Try to get NTP timestamp from RTSP stream
-            val ntpTimestamp = (exoPlayer.currentMediaItem?.localConfiguration as? RtspMediaSource)
-                ?.rtpTimestamp?.let { rtp ->
-                    // Convert RTP timestamp to wall clock time
-                    Instant.ofEpochMilli(rtp)
-                        .atZone(ZoneId.systemDefault())
-                        .toLocalDateTime()
-                }
+            val timeline = exoPlayer.currentTimeline
+            if (timeline.windowCount > 0) {
+                val window = Timeline.Window()
+                timeline.getWindow(0, window)
 
-            ntpTimestamp?.let { cameraDateTime ->
-                _cameraTime.value = cameraDateTime
-                
-                // Compare with system time
-                val systemTime = LocalDateTime.now()
-                val diffSeconds = java.time.Duration.between(cameraDateTime, systemTime).seconds.absoluteValue
-                
-                _timeSyncStatus.value = when {
-                    diffSeconds < 1 -> TimeSyncStatus.Synced
-                    diffSeconds < 5 -> TimeSyncStatus.SlightlyOff(diffSeconds)
-                    else -> TimeSyncStatus.OutOfSync(diffSeconds)
+                val presentationStartTimeMs = window.presentationStartTimeMs
+                if (presentationStartTimeMs != C.TIME_UNSET) {
+                    val cameraDateTime = LocalDateTime.ofInstant(
+                        Instant.ofEpochMilli(presentationStartTimeMs),
+                        ZoneId.systemDefault()
+                    )
+                    _cameraTime.value = cameraDateTime
+
+                    // Compare with system time
+                    val systemTime = LocalDateTime.now()
+                    val diffSeconds = java.time.Duration.between(cameraDateTime, systemTime).seconds.absoluteValue
+
+                    _timeSyncStatus.value = when {
+                        diffSeconds < 1 -> TimeSyncStatus.Synced
+                        diffSeconds < 5 -> TimeSyncStatus.SlightlyOff(diffSeconds)
+                        else -> TimeSyncStatus.OutOfSync(diffSeconds)
+                    }
                 }
             }
         }
